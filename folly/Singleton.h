@@ -53,9 +53,9 @@
 // namespace {
 // struct Tag1 {};
 // struct Tag2 {};
-// folly::Singleton<MyExpensiveService> s_default();
-// folly::Singleton<MyExpensiveService, Tag1> s1();
-// folly::Singleton<MyExpensiveService, Tag2> s2();
+// folly::Singleton<MyExpensiveService> s_default;
+// folly::Singleton<MyExpensiveService, Tag1> s1;
+// folly::Singleton<MyExpensiveService, Tag2> s2;
 // }
 // ...
 // MyExpensiveService* svc_default = s_default.get();
@@ -103,6 +103,11 @@
 #include <typeindex>
 
 #include <glog/logging.h>
+
+// use this guard to handleSingleton breaking change in 3rd party code
+#ifndef FOLLY_SINGLETON_TRY_GET
+#define FOLLY_SINGLETON_TRY_GET
+#endif
 
 namespace folly {
 
@@ -188,7 +193,7 @@ class TypeDescriptorHasher {
 // SingletonHolders.
 class SingletonHolderBase {
  public:
-  virtual ~SingletonHolderBase() {}
+  virtual ~SingletonHolderBase() = default;
 
   virtual TypeDescriptor type() = 0;
   virtual bool hasLiveInstance() = 0;
@@ -306,7 +311,7 @@ class SingletonVault {
   // Mark registration is complete; no more singletons can be
   // registered at this point.
   void registrationComplete() {
-    RequestContext::getStaticContext();
+    RequestContext::saveContext();
     std::atexit([](){ SingletonVault::singleton()->destroyInstances(); });
 
     RWSpinLock::WriteHolder wh(&stateMutex_);
@@ -423,7 +428,7 @@ class SingletonVault {
 // It allows for simple access to registering and instantiating
 // singletons.  Create instances of this class in the global scope of
 // type Singleton<T> to register your singleton for later access via
-// Singleton<T>::get().
+// Singleton<T>::try_get().
 template <typename T,
           typename Tag = detail::DefaultTag,
           typename VaultTag = detail::DefaultTag /* for testing */>
@@ -435,7 +440,7 @@ class Singleton {
   // Generally your program life cycle should be fine with calling
   // get() repeatedly rather than saving the reference, and then not
   // call get() during process shutdown.
-  static T* get() {
+  static T* get() __attribute__ ((__deprecated__("Replaced by try_get"))) {
     return getEntry().get();
   }
 
@@ -447,18 +452,28 @@ class Singleton {
     return getEntry().get_weak();
   }
 
-  // Allow the Singleton<t> instance to also retrieve the underlying
-  // singleton, if desired.
-  T& operator*() { return *get(); }
-  T* operator->() { return get(); }
+  // Preferred alternative to get_weak, it returns shared_ptr that can be
+  // stored; a singleton won't be destroyed unless shared_ptr is destroyed.
+  // Avoid holding these shared_ptrs beyond the scope of a function;
+  // don't put them in member variables, always use try_get() instead
+  static std::shared_ptr<T> try_get() {
+    auto ret = get_weak().lock();
+    if (!ret) {
+      LOG(DFATAL) <<
+        "folly::Singleton<" << getEntry().type().name() <<
+        ">::get_weak() called on destructed singleton; "
+        "returning nullptr, possible segfault coming";
+    }
+    return ret;
+  }
 
   explicit Singleton(std::nullptr_t _ = nullptr,
-                     Singleton::TeardownFunc t = nullptr) :
+                     typename Singleton::TeardownFunc t = nullptr) :
       Singleton ([]() { return new T; }, std::move(t)) {
   }
 
-  explicit Singleton(Singleton::CreateFunc c,
-                     Singleton::TeardownFunc t = nullptr) {
+  explicit Singleton(typename Singleton::CreateFunc c,
+                     typename Singleton::TeardownFunc t = nullptr) {
     if (c == nullptr) {
       throw std::logic_error(
         "nullptr_t should be passed if you want T to be default constructed");

@@ -44,16 +44,19 @@ Promise<T>& Promise<T>::operator=(Promise<T>&& other) noexcept {
 
 template <class T>
 void Promise<T>::throwIfFulfilled() {
-  if (!core_)
+  if (UNLIKELY(!core_)) {
     throw NoState();
-  if (core_->ready())
+  }
+  if (UNLIKELY(core_->ready())) {
     throw PromiseAlreadySatisfied();
+  }
 }
 
 template <class T>
 void Promise<T>::throwIfRetrieved() {
-  if (retrieved_)
+  if (UNLIKELY(retrieved_)) {
     throw FutureAlreadyRetrieved();
+  }
 }
 
 template <class T>
@@ -128,6 +131,14 @@ template <class F>
 void Promise<T>::setWith(F&& func) {
   throwIfFulfilled();
   setTry(makeTryWith(std::forward<F>(func)));
+}
+
+template <class T>
+bool Promise<T>::isFulfilled() {
+  if (core_) {
+    return core_->hasResult();
+  }
+  return true;
 }
 
 }

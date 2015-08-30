@@ -121,9 +121,7 @@ class AsyncServerSocket::BackoffTimeout : public AsyncTimeout {
   BackoffTimeout(AsyncServerSocket* socket)
       : AsyncTimeout(socket->getEventBase()), socket_(socket) {}
 
-  virtual void timeoutExpired() noexcept {
-    socket_->backoffTimeoutExpired();
-  }
+  void timeoutExpired() noexcept override { socket_->backoffTimeoutExpired(); }
 
  private:
   AsyncServerSocket* socket_;
@@ -396,7 +394,7 @@ void AsyncServerSocket::bind(uint16_t port) {
     }
   };
 
-  const int kNumTries = 5;
+  const int kNumTries = 25;
   for (int tries = 1; true; tries++) {
     // Prefer AF_INET6 addresses. RFC 3484 mandates that getaddrinfo
     // should return IPv6 first and then IPv4 addresses, but glibc's
@@ -638,7 +636,6 @@ void AsyncServerSocket::setupSocket(int fd) {
   // Get the address family
   SocketAddress address;
   address.setFromLocalAddress(fd);
-  auto family = address.getFamily();
 
   // Put the socket in non-blocking mode
   if (fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
@@ -681,6 +678,7 @@ void AsyncServerSocket::setupSocket(int fd) {
   // Set TCP nodelay if available, MAC OS X Hack
   // See http://lists.danga.com/pipermail/memcached/2005-March/001240.html
 #ifndef TCP_NOPUSH
+  auto family = address.getFamily();
   if (family != AF_UNIX) {
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
       // This isn't a fatal error; just log an error message and continue
@@ -726,8 +724,8 @@ void AsyncServerSocket::handlerReady(
 
     std::chrono::time_point<std::chrono::steady_clock> nowMs =
       std::chrono::steady_clock::now();
-    int64_t timeSinceLastAccept = std::max(
-      int64_t(0),
+    auto timeSinceLastAccept = std::max<int64_t>(
+      0,
       nowMs.time_since_epoch().count() -
       lastAccepTimestamp_.time_since_epoch().count());
     lastAccepTimestamp_ = nowMs;

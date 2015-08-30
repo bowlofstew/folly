@@ -191,8 +191,7 @@ class AtomicHashMap : boost::noncopyable {
   // The constructor takes a finalSizeEst which is the optimal
   // number of elements to maximize space utilization and performance,
   // and a Config object to specify more advanced options.
-  static const Config defaultConfig;
-  explicit AtomicHashMap(size_t finalSizeEst, const Config& = defaultConfig);
+  explicit AtomicHashMap(size_t finalSizeEst, const Config& c = Config());
 
   ~AtomicHashMap() {
     const int numMaps = numMapsAllocated_.load(std::memory_order_relaxed);
@@ -385,11 +384,11 @@ class AtomicHashMap : boost::noncopyable {
   static const uint32_t  kSubMapIndexShift_  = 32 - kNumSubMapBits_ - 1;
   static const uint32_t  kSubMapIndexMask_   = (1 << kSubMapIndexShift_) - 1;
   static const uint32_t  kNumSubMaps_        = 1 << kNumSubMapBits_;
-  static const uintptr_t kLockedPtr_         = 0x88ul << 48; // invalid pointer
+  static const uintptr_t kLockedPtr_         = 0x88ULL << 48; // invalid pointer
 
   struct SimpleRetT { uint32_t i; size_t j; bool success;
     SimpleRetT(uint32_t ii, size_t jj, bool s) : i(ii), j(jj), success(s) {}
-    SimpleRetT() {}
+    SimpleRetT() = default;
   };
 
   template <class T>

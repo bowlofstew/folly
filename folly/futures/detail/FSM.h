@@ -18,7 +18,7 @@
 
 #include <atomic>
 #include <mutex>
-#include <folly/SmallLocks.h>
+#include <folly/MicroSpinLock.h>
 
 namespace folly { namespace detail {
 
@@ -44,7 +44,7 @@ public:
   explicit FSM(Enum startState) : state_(startState) {}
 
   Enum getState() const {
-    return state_.load(std::memory_order_relaxed);
+    return state_.load(std::memory_order_acquire);
   }
 
   /// Atomically do a state transition with accompanying action.
@@ -52,10 +52,16 @@ public:
   /// @returns true on success, false and action unexecuted otherwise
   template <class F>
   bool updateState(Enum A, Enum B, F const& action) {
-    std::lock_guard<Mutex> lock(mutex_);
-    if (state_ != A) return false;
+    if (!mutex_.try_lock()) {
+      mutex_.lock();
+    }
+    if (state_.load(std::memory_order_acquire) != A) {
+      mutex_.unlock();
+      return false;
+    }
     action();
-    state_ = B;
+    state_.store(B, std::memory_order_release);
+    mutex_.unlock();
     return true;
   }
 

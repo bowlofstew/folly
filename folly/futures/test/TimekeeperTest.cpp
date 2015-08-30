@@ -13,18 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <gtest/gtest.h>
 
 #include <folly/futures/Timekeeper.h>
+
 #include <unistd.h>
 
 using namespace folly;
-using namespace std::chrono;
-using folly::Timekeeper;
-using Duration = folly::Duration;
+using std::chrono::milliseconds;
 
+std::chrono::milliseconds const zero_ms(0);
 std::chrono::milliseconds const one_ms(1);
 std::chrono::milliseconds const awhile(10);
+std::chrono::seconds const too_long(10);
 
 std::chrono::steady_clock::time_point now() {
   return std::chrono::steady_clock::now();
@@ -39,8 +41,6 @@ struct TimekeeperFixture : public testing::Test {
 };
 
 TEST_F(TimekeeperFixture, after) {
-  Duration waited(0);
-
   auto t1 = now();
   auto f = timeLord_->after(awhile);
   EXPECT_FALSE(f.isReady());
@@ -52,8 +52,9 @@ TEST_F(TimekeeperFixture, after) {
 
 TEST(Timekeeper, futureGet) {
   Promise<int> p;
-  std::thread([&]{ p.setValue(42); }).detach();
+  auto t = std::thread([&]{ p.setValue(42); });
   EXPECT_EQ(42, p.getFuture().get());
+  t.join();
 }
 
 TEST(Timekeeper, futureGetBeforeTimeout) {
@@ -65,13 +66,13 @@ TEST(Timekeeper, futureGetBeforeTimeout) {
   // runs it by hand they're not sitting there forever wondering why it's
   // blocked, and get a useful error message instead. If it does get flaky,
   // empirically increase the timeout to the point where it's very improbable.
-  EXPECT_EQ(42, p.getFuture().get(seconds(2)));
+  EXPECT_EQ(42, p.getFuture().get(std::chrono::seconds(2)));
   t.join();
 }
 
 TEST(Timekeeper, futureGetTimeout) {
   Promise<int> p;
-  EXPECT_THROW(p.getFuture().get(Duration(1)), folly::TimedOut);
+  EXPECT_THROW(p.getFuture().get(one_ms), folly::TimedOut);
 }
 
 TEST(Timekeeper, futureSleep) {
@@ -122,7 +123,7 @@ TEST(Timekeeper, futureWithinVoidSpecialization) {
 }
 
 TEST(Timekeeper, futureWithinException) {
-  Promise<void> p;
+  Promise<Unit> p;
   auto f = p.getFuture().within(awhile, std::runtime_error("expected"));
   EXPECT_THROW(f.get(), std::runtime_error);
 }
@@ -130,7 +131,7 @@ TEST(Timekeeper, futureWithinException) {
 TEST(Timekeeper, onTimeout) {
   bool flag = false;
   makeFuture(42).delayed(one_ms)
-    .onTimeout(Duration(0), [&]{ flag = true; return -1; })
+    .onTimeout(zero_ms, [&]{ flag = true; return -1; })
     .get();
   EXPECT_TRUE(flag);
 }
@@ -138,20 +139,51 @@ TEST(Timekeeper, onTimeout) {
 TEST(Timekeeper, onTimeoutReturnsFuture) {
   bool flag = false;
   makeFuture(42).delayed(one_ms)
-    .onTimeout(Duration(0), [&]{ flag = true; return makeFuture(-1); })
+    .onTimeout(zero_ms, [&]{ flag = true; return makeFuture(-1); })
     .get();
   EXPECT_TRUE(flag);
 }
 
 TEST(Timekeeper, onTimeoutVoid) {
   makeFuture().delayed(one_ms)
-    .onTimeout(Duration(0), [&]{
+    .onTimeout(zero_ms, [&]{
      });
   makeFuture().delayed(one_ms)
-    .onTimeout(Duration(0), [&]{
-       return makeFuture<void>(std::runtime_error("expected"));
+    .onTimeout(zero_ms, [&]{
+       return makeFuture<Unit>(std::runtime_error("expected"));
      });
   // just testing compilation here
+}
+
+TEST(Timekeeper, interruptDoesntCrash) {
+  auto f = futures::sleep(too_long);
+  f.cancel();
+}
+
+TEST(Timekeeper, chainedInterruptTest) {
+  bool test = false;
+  auto f = futures::sleep(milliseconds(100)).then([&](){
+    test = true;
+  });
+  f.cancel();
+  f.wait();
+  EXPECT_FALSE(test);
+}
+
+TEST(Timekeeper, executor) {
+  class ExecutorTester : public Executor {
+   public:
+    void add(Func f) override {
+      count++;
+      f();
+    }
+    std::atomic<int> count{0};
+  };
+
+  auto f = makeFuture();
+  ExecutorTester tester;
+  f.via(&tester).within(one_ms).then([&](){}).wait();
+  EXPECT_EQ(2, tester.count);
 }
 
 // TODO(5921764)
@@ -160,9 +192,22 @@ TEST(Timekeeper, onTimeoutPropagates) {
   bool flag = false;
   EXPECT_THROW(
     makeFuture(42).delayed(one_ms)
-      .onTimeout(Duration(0), [&]{ flag = true; })
+      .onTimeout(zero_ms, [&]{ flag = true; })
       .get(),
     TimedOut);
   EXPECT_TRUE(flag);
 }
 */
+
+TEST_F(TimekeeperFixture, atBeforeNow) {
+  auto f = timeLord_->at(now() - too_long);
+  EXPECT_TRUE(f.isReady());
+  EXPECT_FALSE(f.hasException());
+}
+
+TEST_F(TimekeeperFixture, howToCastDuration) {
+  // I'm not sure whether this rounds up or down but it's irrelevant for the
+  // purpose of this example.
+  auto f = timeLord_->after(std::chrono::duration_cast<Duration>(
+      std::chrono::nanoseconds(1)));
+}

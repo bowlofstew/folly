@@ -18,15 +18,18 @@
 #include <cassert>
 
 #include <folly/CPortability.h>
+#include <folly/Memory.h>
+#include <folly/Optional.h>
+#include <folly/Portability.h>
+#include <folly/ScopeGuard.h>
+#ifdef __APPLE__
+#include <folly/ThreadLocal.h>
+#endif
 #include <folly/experimental/fibers/Baton.h>
 #include <folly/experimental/fibers/Fiber.h>
 #include <folly/experimental/fibers/LoopController.h>
 #include <folly/experimental/fibers/Promise.h>
 #include <folly/futures/Try.h>
-#include <folly/Memory.h>
-#include <folly/Optional.h>
-#include <folly/Portability.h>
-#include <folly/ScopeGuard.h>
 
 namespace folly { namespace fibers {
 
@@ -63,6 +66,7 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
   assert(fiber->state_ == Fiber::NOT_STARTED ||
          fiber->state_ == Fiber::READY_TO_RUN);
   currentFiber_ = fiber;
+  fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
   if (observer_) {
     observer_->starting(reinterpret_cast<uintptr_t>(fiber));
   }
@@ -89,6 +93,7 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
       observer_->stopped(reinterpret_cast<uintptr_t>(fiber));
     }
     currentFiber_ = nullptr;
+    fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
   } else if (fiber->state_ == Fiber::INVALID) {
     assert(fibersActive_ > 0);
     --fibersActive_;
@@ -110,7 +115,9 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
       observer_->stopped(reinterpret_cast<uintptr_t>(fiber));
     }
     currentFiber_ = nullptr;
+    fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
     fiber->localData_.reset();
+    fiber->rcontext_.reset();
 
     if (fibersPoolSize_ < options_.maxFibersPoolSize) {
       fibersPool_.push_front(*fiber);
@@ -125,6 +132,7 @@ inline void FiberManager::runReadyFiber(Fiber* fiber) {
       observer_->stopped(reinterpret_cast<uintptr_t>(fiber));
     }
     currentFiber_ = nullptr;
+    fiber->rcontext_ = RequestContext::setContext(std::move(fiber->rcontext_));
     fiber->state_ = Fiber::READY_TO_RUN;
     yieldedFibers_.push_back(*fiber);
   }
@@ -165,6 +173,7 @@ inline bool FiberManager::loopUntilNoReady() {
         if (task->localData) {
           fiber->localData_ = *task->localData;
         }
+        fiber->rcontext_ = std::move(task->rcontext);
 
         fiber->setFunction(std::move(task->func));
         fiber->data_ = reinterpret_cast<intptr_t>(fiber);
@@ -454,8 +463,13 @@ T& FiberManager::local() {
 
 template <typename T>
 T& FiberManager::localThread() {
+#ifndef __APPLE__
   static thread_local T t;
   return t;
+#else // osx doesn't support thread_local
+  static ThreadLocal<T> t;
+  return *t;
+#endif
 }
 
 inline void FiberManager::initLocalData(Fiber& fiber) {
@@ -463,6 +477,7 @@ inline void FiberManager::initLocalData(Fiber& fiber) {
   if (fm && fm->currentFiber_ && fm->localType_ == localType_) {
     fiber.localData_ = fm->currentFiber_->localData_;
   }
+  fiber.rcontext_ = RequestContext::saveContext();
 }
 
 template <typename LocalT>
@@ -471,6 +486,7 @@ FiberManager::FiberManager(
   std::unique_ptr<LoopController> loopController__,
   Options options)  :
     loopController_(std::move(loopController__)),
+    stackAllocator_(options.useGuardPages),
     options_(preprocessOptions(std::move(options))),
     exceptionCallback_([](std::exception_ptr eptr, std::string context) {
         try {

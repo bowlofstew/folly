@@ -112,7 +112,7 @@ struct IOBuf::HeapFullStorage {
 
   HeapStorage hs;
   SharedInfo shared;
-  MaxAlign align;
+  std::max_align_t align;
 };
 
 IOBuf::SharedInfo::SharedInfo()
@@ -336,6 +336,10 @@ IOBuf::IOBuf(IOBuf&& other) noexcept {
   *this = std::move(other);
 }
 
+IOBuf::IOBuf(const IOBuf& other) {
+  other.cloneInto(*this);
+}
+
 IOBuf::IOBuf(InternalConstructor,
              uintptr_t flagsAndSharedInfo,
              uint8_t* buf,
@@ -410,6 +414,13 @@ IOBuf& IOBuf::operator=(IOBuf&& other) noexcept {
   DCHECK_EQ(other.prev_, &other);
   DCHECK_EQ(other.next_, &other);
 
+  return *this;
+}
+
+IOBuf& IOBuf::operator=(const IOBuf& other) {
+  if (this != &other) {
+    *this = IOBuf(other);
+  }
   return *this;
 }
 
@@ -539,6 +550,19 @@ void IOBuf::unshareChained() {
 
   // We have to unshare.  Let coalesceSlow() do the work.
   coalesceSlow();
+}
+
+void IOBuf::makeManagedChained() {
+  assert(isChained());
+
+  IOBuf* current = this;
+  while (true) {
+    current->makeManagedOne();
+    current = current->next_;
+    if (current == this) {
+      break;
+    }
+  }
 }
 
 void IOBuf::coalesceSlow() {
@@ -723,7 +747,6 @@ void IOBuf::reserveSlow(uint64_t minHeadroom, uint64_t minTailroom) {
           if (xallocx(p, newAllocatedCapacity, 0, 0) == newAllocatedCapacity) {
             newBuffer = static_cast<uint8_t*>(p);
             newHeadroom = oldHeadroom;
-            newAllocatedCapacity = newAllocatedCapacity;
           }
           // if xallocx failed, do nothing, fall back to malloc/memcpy/free
         }

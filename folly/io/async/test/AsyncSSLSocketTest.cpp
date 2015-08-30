@@ -52,10 +52,13 @@ const char* testCert = "folly/io/async/test/certs/tests-cert.pem";
 const char* testKey = "folly/io/async/test/certs/tests-key.pem";
 const char* testCA = "folly/io/async/test/certs/ca-cert.pem";
 
+constexpr size_t SSLClient::kMaxReadBufferSz;
+constexpr size_t SSLClient::kMaxReadsPerEvent;
+
 TestSSLServer::TestSSLServer(SSLServerAcceptCallbackBase *acb) :
 ctx_(new folly::SSLContext),
     acb_(acb),
-  socket_(new folly::AsyncServerSocket(&evb_)) {
+  socket_(folly::AsyncServerSocket::newSocket(&evb_)) {
   // Set up the SSL context
   ctx_->loadCertificate(testCert);
   ctx_->loadPrivateKey(testKey);
@@ -496,6 +499,41 @@ TEST(AsyncSSLSocketTest, SNITestNotMatch) {
   EXPECT_TRUE(!client.serverNameMatch);
   EXPECT_TRUE(!server.serverNameMatch);
 }
+/**
+ * 1. Client sends TLSEXT_HOSTNAME in client hello.
+ * 2. We then change the serverName.
+ * 3. We expect that we get 'false' as the result for serNameMatch.
+ */
+
+TEST(AsyncSSLSocketTest, SNITestChangeServerName) {
+   EventBase eventBase;
+  std::shared_ptr<SSLContext> clientCtx(new SSLContext);
+  std::shared_ptr<SSLContext> dfServerCtx(new SSLContext);
+  // Use the same SSLContext to continue the handshake after
+  // tlsext_hostname match.
+  std::shared_ptr<SSLContext> hskServerCtx(dfServerCtx);
+  const std::string serverName("xyz.newdev.facebook.com");
+  int fds[2];
+  getfds(fds);
+  getctx(clientCtx, dfServerCtx);
+
+  AsyncSSLSocket::UniquePtr clientSock(
+    new AsyncSSLSocket(clientCtx, &eventBase, fds[0], serverName));
+  //Change the server name
+  std::string newName("new.com");
+  clientSock->setServerName(newName);
+  AsyncSSLSocket::UniquePtr serverSock(
+    new AsyncSSLSocket(dfServerCtx, &eventBase, fds[1], true));
+  SNIClient client(std::move(clientSock));
+  SNIServer server(std::move(serverSock),
+                   dfServerCtx,
+                   hskServerCtx,
+                   serverName);
+
+  eventBase.loop();
+
+  EXPECT_TRUE(!client.serverNameMatch);
+}
 
 /**
  * 1. Client does not send TLSEXT_HOSTNAME in client hello.
@@ -803,6 +841,7 @@ TEST(AsyncSSLSocketTest, SSLParseClientHelloOnePacket) {
   cursor.write<uint32_t>(0);
 
   SSL* ssl = ctx->createSSL();
+  SCOPE_EXIT { SSL_free(ssl); };
   AsyncSSLSocket::UniquePtr sock(
       new AsyncSSLSocket(ctx, &eventBase, fds[0], true));
   sock->enableClientHelloParsing();
@@ -842,6 +881,7 @@ TEST(AsyncSSLSocketTest, SSLParseClientHelloTwoPackets) {
   cursor.write<uint32_t>(0);
 
   SSL* ssl = ctx->createSSL();
+  SCOPE_EXIT { SSL_free(ssl); };
   AsyncSSLSocket::UniquePtr sock(
       new AsyncSSLSocket(ctx, &eventBase, fds[0], true));
   sock->enableClientHelloParsing();
@@ -888,6 +928,7 @@ TEST(AsyncSSLSocketTest, SSLParseClientHelloMultiplePackets) {
   cursor.write<uint32_t>(0);
 
   SSL* ssl = ctx->createSSL();
+  SCOPE_EXIT { SSL_free(ssl); };
   AsyncSSLSocket::UniquePtr sock(
       new AsyncSSLSocket(ctx, &eventBase, fds[0], true));
   sock->enableClientHelloParsing();
@@ -1224,7 +1265,89 @@ TEST(AsyncSSLSocketTest, MinWriteSizeTest) {
   socket->setMinWriteSize(50000);
   EXPECT_EQ(50000, socket->getMinWriteSize());
 }
+
+class ReadCallbackTerminator : public ReadCallback {
+ public:
+  ReadCallbackTerminator(EventBase* base, WriteCallbackBase *wcb)
+      : ReadCallback(wcb)
+      , base_(base) {}
+
+  // Do not write data back, terminate the loop.
+  void readDataAvailable(size_t len) noexcept override {
+    std::cerr << "readDataAvailable, len " << len << std::endl;
+
+    currentBuffer.length = len;
+
+    buffers.push_back(currentBuffer);
+    currentBuffer.reset();
+    state = STATE_SUCCEEDED;
+
+    socket_->setReadCB(nullptr);
+    base_->terminateLoopSoon();
+  }
+ private:
+  EventBase* base_;
+};
+
+
+/**
+ * Test a full unencrypted codepath
+ */
+TEST(AsyncSSLSocketTest, UnencryptedTest) {
+  EventBase base;
+
+  auto clientCtx = std::make_shared<folly::SSLContext>();
+  auto serverCtx = std::make_shared<folly::SSLContext>();
+  int fds[2];
+  getfds(fds);
+  getctx(clientCtx, serverCtx);
+  auto client = AsyncSSLSocket::newSocket(
+                  clientCtx, &base, fds[0], false, true);
+  auto server = AsyncSSLSocket::newSocket(
+                  serverCtx, &base, fds[1], true, true);
+
+  ReadCallbackTerminator readCallback(&base, nullptr);
+  server->setReadCB(&readCallback);
+  readCallback.setSocket(server);
+
+  uint8_t buf[128];
+  memset(buf, 'a', sizeof(buf));
+  client->write(nullptr, buf, sizeof(buf));
+
+  // Check that bytes are unencrypted
+  char c;
+  EXPECT_EQ(1, recv(fds[1], &c, 1, MSG_PEEK));
+  EXPECT_EQ('a', c);
+
+  EventBaseAborter eba(&base, 3000);
+  base.loop();
+
+  EXPECT_EQ(1, readCallback.buffers.size());
+  EXPECT_EQ(AsyncSSLSocket::STATE_UNENCRYPTED, client->getSSLState());
+
+  server->setReadCB(&readCallback);
+
+  // Unencrypted
+  server->sslAccept(nullptr);
+  client->sslConn(nullptr);
+
+  // Do NOT wait for handshake, writing should be queued and happen after
+
+  client->write(nullptr, buf, sizeof(buf));
+
+  // Check that bytes are *not* unencrypted
+  char c2;
+  EXPECT_EQ(1, recv(fds[1], &c2, 1, MSG_PEEK));
+  EXPECT_NE('a', c2);
+
+
+  base.loop();
+
+  EXPECT_EQ(2, readCallback.buffers.size());
+  EXPECT_EQ(AsyncSSLSocket::STATE_ESTABLISHED, client->getSSLState());
 }
+
+} // namespace
 
 ///////////////////////////////////////////////////////////////////////////
 // init_unit_test_suite

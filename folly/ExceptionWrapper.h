@@ -112,10 +112,12 @@ class exception_wrapper {
   // Implicitly construct an exception_wrapper from a qualifying exception.
   // See the optimize struct for details.
   template <typename Ex, typename =
-    typename std::enable_if<optimize<Ex>::value>::type>
+    typename std::enable_if<optimize<typename std::decay<Ex>::type>::value>
+    ::type>
   /* implicit */ exception_wrapper(Ex&& exn) {
-    item_ = std::make_shared<Ex>(std::forward<Ex>(exn));
-    throwfn_ = folly::detail::Thrower<Ex>::doThrow;
+    typedef typename std::decay<Ex>::type DEx;
+    item_ = std::make_shared<DEx>(std::forward<Ex>(exn));
+    throwfn_ = folly::detail::Thrower<DEx>::doThrow;
   }
 
   // The following two constructors are meant to emulate the behavior of
@@ -412,7 +414,7 @@ class try_and_catch<LastException, Exceptions...> :
 
   template <typename Ex>
   typename std::enable_if<exception_wrapper::optimize<Ex>::value>::type
-  assign_exception(Ex& e, std::exception_ptr eptr) {
+  assign_exception(Ex& e, std::exception_ptr /*eptr*/) {
     this->item_ = std::make_shared<Ex>(e);
     this->throwfn_ = folly::detail::Thrower<Ex>::doThrow;
   }
@@ -434,7 +436,7 @@ class try_and_catch<LastException, Exceptions...> :
 template<>
 class try_and_catch<> : public exception_wrapper {
  public:
-  try_and_catch() {}
+  try_and_catch() = default;
 
  protected:
   template <typename F>

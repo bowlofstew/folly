@@ -52,11 +52,53 @@ fi
 
 CXXFLAGS="$STD $CXXFLAGS"
 
-# Checks for libraries.
-AC_CHECK_LIB([glog],[openlog],[],[AC_MSG_ERROR(
-             [Please install google-glog library])])
-AC_CHECK_LIB([gflags],[getenv],[],[AC_MSG_ERROR(
-             [Please install google-gflags library])])
+# Checks for glog and gflags
+# There are no symbols with C linkage, so we do a try-run
+AC_HAVE_LIBRARY([glog],[],[AC_MSG_ERROR(
+                [Please install google-glog library])])
+AC_CACHE_CHECK(
+  [for glog viability],
+  [folly_cv_prog_cc_glog],
+  [AC_RUN_IFELSE(
+    [AC_LANG_SOURCE[
+      #include <glog/logging.h>
+      int main(int argc, char** argv) {
+        google::InitGoogleLogging(argv[0]);
+        google::ShutdownGoogleLogging();
+        return 0;
+      }
+    ]],
+    [folly_cv_prog_cc_glog=yes],
+    [folly_cv_prog_cc_glog=no]
+  )]
+)
+
+if test "$folly_cv_prog_cc_glog" != "yes"; then
+  AC_MSG_ERROR(["libglog invalid, see config.log for details"])
+fi
+
+AC_HAVE_LIBRARY([gflags],[],[AC_MSG_ERROR(
+                [Please install google-gflags library])])
+AC_CACHE_CHECK(
+  [for gflags viability],
+  [folly_cv_prog_cc_gflags],
+  [AC_RUN_IFELSE(
+    [AC_LANG_SOURCE[
+      #include <gflags/gflags.h>
+      DEFINE_bool(folly_truthy, true, "Sample truthy flag");
+      DEFINE_bool(folly_falsey, false, "Sample falsey flag");
+      int main(int argc, char** argv) {
+        return (FLAGS_folly_truthy && !FLAGS_folly_falsey) ? 0 : 1;
+      }
+    ]],
+    [folly_cv_prog_cc_gflags=yes],
+    [folly_cv_prog_cc_gflags=no]
+  )]
+)
+
+if test "$folly_cv_prog_cc_gflags" != "yes"; then
+  AC_MSG_ERROR(["libgflags invalid, see config.log for details"])
+fi
 
 AC_CHECK_LIB(ssl,
         SSL_ctrl,
@@ -65,12 +107,16 @@ AC_CHECK_LIB(ssl,
 
 # check for boost libs
 AX_BOOST_BASE([1.51.0], [], [AC_MSG_ERROR(
-              [Please install boost >= 1.51.0 (context, thread, regex, and system)])])
+              [Please install boost >= 1.51.0 (context, thread, program_options, regex, and system)])])
 AX_BOOST_CONTEXT
+AX_BOOST_PROGRAM_OPTIONS
 AX_BOOST_THREAD
 AX_BOOST_REGEX
 AX_BOOST_SYSTEM
 AX_BOOST_FILESYSTEM
+
+# Check for python interpreter
+AM_PATH_PYTHON
 
 # Checks for header files.
 AC_HEADER_STDC
@@ -78,7 +124,7 @@ AC_CHECK_HEADERS([fcntl.h features.h inttypes.h limits.h stdint.h stdlib.h strin
 
 AC_CHECK_HEADER(double-conversion/double-conversion.h, [], [AC_MSG_ERROR(
                 [Couldn't find double-conversion.h, please download from \
-                 https://github.com/floitsch/double-conversion/])], [])
+                 https://github.com/google/double-conversion/])], [])
 AC_CHECK_LIB([double-conversion],[ceil],[],[AC_MSG_ERROR(
              [Please install double-conversion library])])
 
@@ -250,6 +296,25 @@ if test "$folly_cv_prog_cc_weak_symbols" = yes; then
             [Define to 1 if the linker supports weak symbols.])
 fi
 
+AC_CACHE_CHECK(
+  [for vsnprintf reporting bad format strings],
+  [folly_cv_prog_vsnprintf_bad_format],
+  [AC_RUN_IFELSE(
+    [AC_LANG_SOURCE[
+      #include <stdio.h>
+
+      int main(int argc, char** argv) {
+          char buf[256];
+          return vsnprintf(buf, sizeof(buf), "%", 1) < 0 ? 0 : 1;
+      }]],
+    [folly_cv_prog_vsnprintf_bad_format="yes"],
+    [folly_cv_prog_vsnprintf_bad_format="no"])])
+
+if test "$folly_cv_prog_vsnprintf_bad_format" = yes; then
+  AC_DEFINE([HAVE_VSNPRINTF_ERRORS], [1],
+            [Define to 1 if the vsnprintf supports returning errors on bad format strings.])
+fi
+
 AC_SEARCH_LIBS([cplus_demangle_v3_callback], [iberty_pic iberty])
 if test "$ac_cv_search_cplus_demangle_v3_callback" != "no" ; then
   AC_DEFINE([HAVE_CPLUS_DEMANGLE_V3_CALLBACK], [1],
@@ -282,6 +347,28 @@ if test "$folly_cv_prog_cc_pthread_atfork" = "yes"; then
   AC_DEFINE([HAVE_PTHREAD_ATFORK], [1], [Define to 1 if the compiler supports pthread_atfork])
 fi
 
+# Check for XSI-compatible strerror_r as default implementation
+AC_CACHE_CHECK(
+  [for XSI style strerror_r support],
+  [folly_cv_prog_cc_xsi_strerror_r],
+  [AC_RUN_IFELSE(
+    [AC_LANG_SOURCE[
+      #include <string.h>
+      #include <errno.h>
+      int main(int argc, char** argv) {
+        char buf[1024];
+        buf[0] = 0;
+        int ret = strerror_r(ENOMEM, buf, sizeof(buf));
+        return ret;
+      }
+    ]],
+    [folly_cv_prog_cc_xsi_strerror_r=yes],
+    [folly_cv_prog_cc_xsi_strerror_r=no])])
+
+if test "$folly_cv_prog_cc_xsi_strerror_r" = "yes"; then
+  AC_DEFINE([HAVE_XSI_STRERROR_R], [1], [Define to 1 if the runtime supports XSI-style strerror_r])
+fi
+
 # Checks for library functions.
 AC_CHECK_FUNCS([getdelim \
                 gettimeofday \
@@ -308,7 +395,8 @@ AC_CHECK_HEADER([lzma.h], AC_CHECK_LIB([lzma], [main]))
 # Include directory that contains "folly" so #include <folly/Foo.h> works
 AM_CPPFLAGS='-I$(top_srcdir)/..'
 AM_CPPFLAGS="$AM_CPPFLAGS $BOOST_CPPFLAGS"
-AM_LDFLAGS="$AM_LDFLAGS $BOOST_CONTEXT_LIB $BOOST_THREAD_LIB $BOOST_FILESYSTEM_LIB"
+AM_LDFLAGS="$AM_LDFLAGS $BOOST_CONTEXT_LIB $BOOST_PROGRAM_OPTIONS_LIB"
+AM_LDFLAGS="$AM_LDFLAGS $BOOST_THREAD_LIB $BOOST_FILESYSTEM_LIB"
 AM_LDFLAGS="$AM_LDFLAGS $BOOST_SYSTEM_LIB $BOOST_REGEX_LIB -lpthread"
 
 AC_SUBST([AM_CPPFLAGS])

@@ -182,4 +182,39 @@ spooky_hash_v2_test_SOURCES = SpookyHashV2Test.cpp
 spooky_hash_v2_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la $(top_builddir)/libfollybenchmark.la
 TESTS += spooky_hash_v2_test
 
+futures_test_SOURCES = \
+    ../futures/test/CollectTest.cpp \
+    ../futures/test/ContextTest.cpp \
+    ../futures/test/CoreTest.cpp \
+    ../futures/test/ThreadedExecutorTest.cpp \
+    ../futures/test/EnsureTest.cpp \
+    ../futures/test/ExecutorTest.cpp \
+    ../futures/test/FSMTest.cpp \
+    ../futures/test/FilterTest.cpp \
+    ../futures/test/FutureTest.cpp \
+    ../futures/test/HeaderCompileTest.cpp \
+    ../futures/test/InterruptTest.cpp \
+    ../futures/test/MapTest.cpp \
+    ../futures/test/PollTest.cpp \
+    ../futures/test/PromiseTest.cpp \
+    ../futures/test/ReduceTest.cpp \
+    ../futures/test/RetryingTest.cpp \
+    ../futures/test/SharedPromiseTest.cpp \
+    ../futures/test/ThenCompileTest.cpp \
+    ../futures/test/ThenTest.cpp \
+    ../futures/test/TimekeeperTest.cpp \
+    ../futures/test/TimesTest.cpp \
+    ../futures/test/TryTest.cpp \
+    ../futures/test/UnitTest.cpp \
+    ../futures/test/UnwrapTest.cpp \
+    ../futures/test/ViaTest.cpp \
+    ../futures/test/WaitTest.cpp \
+    ../futures/test/WillEqualTest.cpp \
+    ../futures/test/WindowTest.cpp \
+    ../futures/test/WhenTest.cpp \
+    ../futures/test/WhileDoTest.cpp
+
+futures_test_LDADD = libgtestmain.la $(top_builddir)/libfolly.la
+TESTS += futures_test
+
 check_PROGRAMS += $(TESTS)

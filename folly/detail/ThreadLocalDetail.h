@@ -60,7 +60,7 @@ class DeleterBase {
 template <class Ptr>
 class SimpleDeleter : public DeleterBase {
  public:
-  virtual void dispose(void* ptr, TLPDestructionMode mode) const {
+  virtual void dispose(void* ptr, TLPDestructionMode /*mode*/) const {
     delete static_cast<Ptr>(ptr);
   }
 };
@@ -212,7 +212,7 @@ struct StaticMeta {
                          /*parent*/ &StaticMeta::onForkParent,
                          /*child*/ &StaticMeta::onForkChild);
     checkPosixError(ret, "pthread_atfork failed");
-#elif !__ANDROID__
+#elif !__ANDROID__ && !defined(_MSC_VER)
     // pthread_atfork is not part of the Android NDK at least as of n9d. If
     // something is trying to call native fork() directly at all with Android's
     // process management model, this is probably the least of the problems.
@@ -267,6 +267,12 @@ struct StaticMeta {
     DCHECK_EQ(ptr, &meta);
     DCHECK_GT(threadEntry->elementsCapacity, 0);
 #else
+    // pthread sets the thread-specific value corresponding
+    // to meta.pthreadKey_ to NULL before calling onThreadExit.
+    // We need to set it back to ptr to enable the correct behaviour
+    // of the subsequent calls of getThreadEntry
+    // (which may happen in user-provided custom deleters)
+    pthread_setspecific(meta.pthreadKey_, ptr);
     ThreadEntry* threadEntry = static_cast<ThreadEntry*>(ptr);
 #endif
     {
@@ -450,8 +456,8 @@ struct StaticMeta {
 
 #ifdef FOLLY_TLD_USE_FOLLY_TLS
 template <class Tag>
-FOLLY_TLS ThreadEntry StaticMeta<Tag>::threadEntry_{nullptr, 0,
-                                                    nullptr, nullptr};
+FOLLY_TLS ThreadEntry StaticMeta<Tag>::threadEntry_ = {nullptr, 0,
+                                                       nullptr, nullptr};
 #endif
 template <class Tag> StaticMeta<Tag>* StaticMeta<Tag>::inst_ = nullptr;
 

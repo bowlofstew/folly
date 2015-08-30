@@ -51,7 +51,7 @@ struct Baton : boost::noncopyable {
   /// wait()ing.  In practice this means that the waiter usually takes
   /// responsibility for destroying the Baton.
   ~Baton() {
-    // The docblock for this function says that is can't be called when
+    // The docblock for this function says that it can't be called when
     // there is a concurrent waiter.  We assume a strong version of this
     // requirement in which the caller must _know_ that this is true, they
     // are not allowed to be merely lucky.  If two threads are involved,
@@ -273,13 +273,11 @@ struct Baton : boost::noncopyable {
         // hooray!
         return true;
       }
-#if FOLLY_X64
       // The pause instruction is the polite way to spin, but it doesn't
       // actually affect correctness to omit it if we don't have it.
       // Pausing donates the full capabilities of the current core to
       // its other hyperthreads for a dozen cycles or so
-      asm volatile ("pause");
-#endif
+      asm_volatile_pause();
     }
 
     return false;

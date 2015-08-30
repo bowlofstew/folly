@@ -139,8 +139,8 @@ public:
   explicit IntException(int i)
     : i_(i) {}
 
-  virtual int getInt() const override { return i_; }
-  virtual const char* what() const noexcept override {
+  int getInt() const override { return i_; }
+  const char* what() const noexcept override {
     what_ = folly::to<std::string>("int == ", i_);
     return what_.c_str();
   }
@@ -226,4 +226,18 @@ TEST(ExceptionWrapper, non_std_exception_test) {
 TEST(ExceptionWrapper, exceptionStr) {
   auto ew = make_exception_wrapper<std::runtime_error>("argh");
   EXPECT_EQ("std::runtime_error: argh", exceptionStr(ew));
+}
+
+namespace {
+class TestException : public std::exception { };
+void testEW(const exception_wrapper& ew) {
+  EXPECT_THROW(ew.throwException(), TestException);
+}
+}  // namespace
+
+TEST(ExceptionWrapper, implicitConstruction) {
+  // Try with both lvalue and rvalue references
+  TestException e;
+  testEW(e);
+  testEW(TestException());
 }

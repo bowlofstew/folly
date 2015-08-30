@@ -28,7 +28,7 @@
 
 namespace folly { namespace fibers {
 
-__thread FiberManager* FiberManager::currentFiberManager_ = nullptr;
+FOLLY_TLS FiberManager* FiberManager::currentFiberManager_ = nullptr;
 
 FiberManager::FiberManager(std::unique_ptr<LoopController> loopController,
                            Options options) :
@@ -41,8 +41,6 @@ FiberManager::~FiberManager() {
     loopController_->cancel();
   }
 
-  Fiber* fiberIt;
-  Fiber* fiberItNext;
   while (!fibersPool_.empty()) {
     fibersPool_.pop_front_and_dispose([] (Fiber* fiber) {
       delete fiber;

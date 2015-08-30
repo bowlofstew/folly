@@ -542,7 +542,10 @@ ProcessReturnCode Subprocess::poll() {
   DCHECK_GT(pid_, 0);
   int status;
   pid_t found = ::waitpid(pid_, &status, WNOHANG);
-  checkUnixError(found, "waitpid");
+  // The spec guarantees that EINTR does not occur with WNOHANG, so the only
+  // two remaining errors are ECHILD (other code reaped the child?), or
+  // EINVAL (cosmic rays?), both of which merit an abort:
+  PCHECK(found != -1) << "waitpid(" << pid_ << ", &status, WNOHANG)";
   if (found != 0) {
     // Though the child process had quit, this call does not close the pipes
     // since its descendants may still be using them.
@@ -568,7 +571,9 @@ ProcessReturnCode Subprocess::wait() {
   do {
     found = ::waitpid(pid_, &status, 0);
   } while (found == -1 && errno == EINTR);
-  checkUnixError(found, "waitpid");
+  // The only two remaining errors are ECHILD (other code reaped the
+  // child?), or EINVAL (cosmic rays?), and both merit an abort:
+  PCHECK(found != -1) << "waitpid(" << pid_ << ", &status, WNOHANG)";
   // Though the child process had quit, this call does not close the pipes
   // since its descendants may still be using them.
   DCHECK_EQ(found, pid_);
@@ -819,7 +824,7 @@ void Subprocess::closeParentFd(int childFd) {
 std::vector<Subprocess::ChildPipe> Subprocess::takeOwnershipOfPipes() {
   std::vector<Subprocess::ChildPipe> pipes;
   for (auto& p : pipes_) {
-    pipes.emplace_back(ChildPipe{p.childFd, std::move(p.pipe)});
+    pipes.emplace_back(p.childFd, std::move(p.pipe));
   }
   pipes_.clear();
   return pipes;

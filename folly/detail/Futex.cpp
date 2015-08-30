@@ -40,8 +40,24 @@ namespace {
 
 #ifdef __linux__
 
+/// Certain toolchains (like Android's) don't include the full futex API in
+/// their headers even though they support it. Make sure we have our constants
+/// even if the headers don't have them.
+#ifndef FUTEX_WAIT_BITSET
+# define FUTEX_WAIT_BITSET 9
+#endif
+#ifndef FUTEX_WAKE_BITSET
+# define FUTEX_WAKE_BITSET 10
+#endif
+#ifndef FUTEX_PRIVATE_FLAG
+# define FUTEX_PRIVATE_FLAG 128
+#endif
+#ifndef FUTEX_CLOCK_REALTIME
+# define FUTEX_CLOCK_REALTIME 256
+#endif
+
 int nativeFutexWake(void* addr, int count, uint32_t wakeMask) {
-  int rv = syscall(SYS_futex,
+  int rv = syscall(__NR_futex,
                    addr, /* addr1 */
                    FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG, /* op */
                    count, /* val */
@@ -49,8 +65,13 @@ int nativeFutexWake(void* addr, int count, uint32_t wakeMask) {
                    nullptr, /* addr2 */
                    wakeMask); /* val3 */
 
-  assert(rv >= 0);
-
+  /* NOTE: we ignore errors on wake for the case of a futex
+     guarding its own destruction, similar to this
+     glibc bug with sem_post/sem_wait:
+     https://sourceware.org/bugzilla/show_bug.cgi?id=12674 */
+  if (rv < 0) {
+    return 0;
+  }
   return rv;
 }
 
@@ -58,13 +79,20 @@ template <class Clock>
 struct timespec
 timeSpecFromTimePoint(time_point<Clock> absTime)
 {
-  auto duration = absTime.time_since_epoch();
-  if (duration.count() < 0) {
+  auto epoch = absTime.time_since_epoch();
+  if (epoch.count() < 0) {
     // kernel timespec_valid requires non-negative seconds and nanos in [0,1G)
-    duration = Clock::duration::zero();
+    epoch = Clock::duration::zero();
   }
-  auto secs = duration_cast<seconds>(duration);
-  auto nanos = duration_cast<nanoseconds>(duration - secs);
+
+  // timespec-safe seconds and nanoseconds;
+  // chrono::{nano,}seconds are `long long int`
+  // whereas timespec uses smaller types
+  using time_t_seconds = duration<std::time_t, seconds::period>;
+  using long_nanos = duration<long int, nanoseconds::period>;
+
+  auto secs = duration_cast<time_t_seconds>(epoch);
+  auto nanos = duration_cast<long_nanos>(epoch - secs);
   struct timespec result = { secs.count(), nanos.count() };
   return result;
 }
@@ -91,7 +119,7 @@ FutexResult nativeFutexWaitImpl(void* addr,
 
   // Unlike FUTEX_WAIT, FUTEX_WAIT_BITSET requires an absolute timeout
   // value - http://locklessinc.com/articles/futex_cheat_sheet/
-  int rv = syscall(SYS_futex,
+  int rv = syscall(__NR_futex,
                    addr, /* addr1 */
                    op, /* op */
                    expected, /* val */

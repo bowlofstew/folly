@@ -21,6 +21,7 @@
 #include <folly/io/async/TimeoutManager.h>
 #include <folly/io/async/Request.h>
 #include <folly/Executor.h>
+#include <folly/experimental/ExecutionObserver.h>
 #include <folly/futures/DrivableExecutor.h>
 #include <memory>
 #include <stack>
@@ -28,6 +29,9 @@
 #include <queue>
 #include <cstdlib>
 #include <set>
+#include <unordered_set>
+#include <unordered_map>
+#include <mutex>
 #include <utility>
 #include <boost/intrusive/list.hpp>
 #include <boost/utility.hpp>
@@ -43,9 +47,21 @@ typedef std::function<void()> Cob;
 template <typename MessageT>
 class NotificationQueue;
 
+namespace detail {
+class EventBaseLocalBase;
+
+class EventBaseLocalBaseBase {
+ public:
+  virtual void onEventBaseDestruction(EventBase& evb) = 0;
+  virtual ~EventBaseLocalBaseBase() = default;
+};
+}
+template <typename T>
+class EventBaseLocal;
+
 class EventBaseObserver {
  public:
-  virtual ~EventBaseObserver() {}
+  virtual ~EventBaseObserver() = default;
 
   virtual uint32_t getSampleRate() const = 0;
 
@@ -113,7 +129,7 @@ class EventBase : private boost::noncopyable,
    */
   class LoopCallback {
    public:
-    virtual ~LoopCallback() {}
+    virtual ~LoopCallback() = default;
 
     virtual void runLoopCallback() noexcept = 0;
     void cancelLoopCallback() {
@@ -401,11 +417,11 @@ class EventBase : private boost::noncopyable,
     return runImmediatelyOrRunInEventBaseThreadAndWait(std::bind(fn, arg));
   }
 
-    /*
+  /*
    * Like runInEventBaseThreadAndWait, except if the caller is already in the
    * event base thread, the functor is simply run inline.
    */
-bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
+  bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
 
   /**
    * Runs the given Cob at some time after the specified number of
@@ -546,6 +562,23 @@ bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
   }
 
   /**
+   * Setup execution observation/instrumentation for every EventHandler
+   * executed in this EventBase.
+   *
+   * @param executionObserver   EventHandle's execution observer.
+   */
+  void setExecutionObserver(ExecutionObserver* observer) {
+    executionObserver_ = observer;
+  }
+
+  /**
+   * Gets the execution observer associated with this EventBase.
+   */
+  ExecutionObserver* getExecutionObserver() {
+    return executionObserver_;
+  }
+
+  /**
    * Set the name of the thread that runs this event base.
    */
   void setName(const std::string& name);
@@ -653,7 +686,7 @@ bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
 
   // stop_ is set by terminateLoopSoon() and is used by the main loop
   // to determine if it should exit
-  bool stop_;
+  std::atomic<bool> stop_;
 
   // The ID of the thread running the main loop.
   // 0 if loop is not running.
@@ -702,8 +735,21 @@ bool runImmediatelyOrRunInEventBaseThreadAndWait(const Cob& fn);
   std::shared_ptr<EventBaseObserver> observer_;
   uint32_t observerSampleCount_;
 
+  // EventHandler's execution observer.
+  ExecutionObserver* executionObserver_;
+
   // Name of the thread running this EventBase
   std::string name_;
+
+  // allow runOnDestruction() to be called from any threads
+  std::mutex onDestructionCallbacksMutex_;
+
+  // see EventBaseLocal
+  friend class detail::EventBaseLocalBase;
+  template <typename T> friend class EventBaseLocal;
+  std::mutex localStorageMutex_;
+  std::unordered_map<uint64_t, std::shared_ptr<void>> localStorage_;
+  std::unordered_set<detail::EventBaseLocalBaseBase*> localStorageToDtor_;
 };
 
 } // folly

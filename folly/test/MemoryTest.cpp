@@ -25,6 +25,42 @@
 
 using namespace folly;
 
+namespace {
+class disposable {
+ public:
+  explicit disposable(std::function<void()> onDispose) :
+    onDispose_(std::move(onDispose)) {}
+  static void dispose(disposable* f) {
+    ASSERT_NE(nullptr, f);
+    f->onDispose_();
+    delete f;
+  }
+ private:
+  std::function<void()> onDispose_;
+};
+}
+
+TEST(static_function_deleter, example) {
+  size_t count = 0;
+  using disposable_deleter =
+    static_function_deleter<disposable, &disposable::dispose>;
+  make_unique<disposable, disposable_deleter>([&] { ++count; });
+  EXPECT_EQ(1, count);
+}
+
+TEST(static_function_deleter, nullptr) {
+  using disposable_deleter =
+    static_function_deleter<disposable, &disposable::dispose>;
+  std::unique_ptr<disposable, disposable_deleter>(nullptr);
+}
+
+TEST(shared_ptr, example) {
+  auto uptr = make_unique<std::string>("hello");
+  auto sptr = to_shared_ptr(std::move(uptr));
+  EXPECT_EQ(nullptr, uptr);
+  EXPECT_EQ("hello", *sptr);
+}
+
 template <std::size_t> struct T {};
 template <std::size_t> struct S {};
 template <std::size_t> struct P {};

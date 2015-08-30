@@ -384,18 +384,23 @@ inline double   dynamic::asDouble() const { return asImpl<double>(); }
 inline int64_t  dynamic::asInt()    const { return asImpl<int64_t>(); }
 inline bool     dynamic::asBool()   const { return asImpl<bool>(); }
 
-inline const fbstring& dynamic::getString() const { return get<fbstring>(); }
-inline double          dynamic::getDouble() const { return get<double>(); }
-inline int64_t         dynamic::getInt()    const { return get<int64_t>(); }
-inline bool            dynamic::getBool()   const { return get<bool>(); }
+inline const fbstring& dynamic::getString() const& { return get<fbstring>(); }
+inline double          dynamic::getDouble() const& { return get<double>(); }
+inline int64_t         dynamic::getInt()    const& { return get<int64_t>(); }
+inline bool            dynamic::getBool()   const& { return get<bool>(); }
 
-inline fbstring& dynamic::getString() { return get<fbstring>(); }
-inline double&   dynamic::getDouble() { return get<double>(); }
-inline int64_t&  dynamic::getInt()    { return get<int64_t>(); }
-inline bool&     dynamic::getBool()   { return get<bool>(); }
+inline fbstring& dynamic::getString() & { return get<fbstring>(); }
+inline double&   dynamic::getDouble() & { return get<double>(); }
+inline int64_t&  dynamic::getInt()    & { return get<int64_t>(); }
+inline bool&     dynamic::getBool()   & { return get<bool>(); }
 
-inline const char* dynamic::data()  const { return get<fbstring>().data();  }
-inline const char* dynamic::c_str() const { return get<fbstring>().c_str(); }
+inline fbstring dynamic::getString() && { return std::move(get<fbstring>()); }
+inline double   dynamic::getDouble() && { return get<double>(); }
+inline int64_t  dynamic::getInt()    && { return get<int64_t>(); }
+inline bool     dynamic::getBool()   && { return get<bool>(); }
+
+inline const char* dynamic::data()  const& { return get<fbstring>().data();  }
+inline const char* dynamic::c_str() const& { return get<fbstring>().c_str(); }
 inline StringPiece dynamic::stringPiece() const { return get<fbstring>(); }
 
 template<class T>
@@ -404,7 +409,7 @@ struct dynamic::CompareOp {
 };
 template<>
 struct dynamic::CompareOp<dynamic::ObjectImpl> {
-  static bool comp(ObjectImpl const& a, ObjectImpl const& b) {
+  static bool comp(ObjectImpl const&, ObjectImpl const&) {
     // This code never executes; it is just here for the compiler.
     return false;
   }
@@ -460,8 +465,12 @@ inline dynamic& dynamic::operator--() {
   return *this;
 }
 
-inline dynamic const& dynamic::operator[](dynamic const& idx) const {
+inline dynamic const& dynamic::operator[](dynamic const& idx) const& {
   return at(idx);
+}
+
+inline dynamic dynamic::operator[](dynamic const& idx) && {
+  return std::move((*this)[idx]);
 }
 
 template<class K, class V> inline dynamic& dynamic::setDefault(K&& k, V&& v) {
@@ -470,12 +479,16 @@ template<class K, class V> inline dynamic& dynamic::setDefault(K&& k, V&& v) {
                                    std::forward<V>(v))).first->second;
 }
 
-inline dynamic* dynamic::get_ptr(dynamic const& idx) {
+inline dynamic* dynamic::get_ptr(dynamic const& idx) & {
   return const_cast<dynamic*>(const_cast<dynamic const*>(this)->get_ptr(idx));
 }
 
-inline dynamic& dynamic::at(dynamic const& idx) {
+inline dynamic& dynamic::at(dynamic const& idx) & {
   return const_cast<dynamic&>(const_cast<dynamic const*>(this)->at(idx));
+}
+
+inline dynamic dynamic::at(dynamic const& idx) && {
+  return std::move(at(idx));
 }
 
 inline bool dynamic::empty() const {
@@ -597,7 +610,7 @@ T dynamic::asImpl() const {
 
 // Return a T* to our type, or null if we're not that type.
 template<class T>
-T* dynamic::get_nothrow() noexcept {
+T* dynamic::get_nothrow() & noexcept {
   if (type_ != TypeInfo<T>::type) {
     return nullptr;
   }
@@ -605,7 +618,7 @@ T* dynamic::get_nothrow() noexcept {
 }
 
 template<class T>
-T const* dynamic::get_nothrow() const noexcept {
+T const* dynamic::get_nothrow() const& noexcept {
   return const_cast<dynamic*>(this)->get_nothrow<T>();
 }
 

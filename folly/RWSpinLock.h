@@ -123,14 +123,16 @@ pthread_rwlock_t Read        728698     24us       101ns     7.28ms     194us
 #if defined(__GNUC__) && \
   (defined(__i386) || FOLLY_X64 || \
    defined(ARCH_K8))
-#define RW_SPINLOCK_USE_X86_INTRINSIC_
-#include <x86intrin.h>
+# define RW_SPINLOCK_USE_X86_INTRINSIC_
+# include <x86intrin.h>
+#elif defined(_MSC_VER) && defined(FOLLY_X64)
+# define RW_SPINLOCK_USE_X86_INTRINSIC_
 #else
-#undef RW_SPINLOCK_USE_X86_INTRINSIC_
+# undef RW_SPINLOCK_USE_X86_INTRINSIC_
 #endif
 
 // iOS doesn't define _mm_cvtsi64_si128 and friends
-#if defined(__SSE2__) && !TARGET_OS_IPHONE
+#if (FOLLY_SSE >= 2) && !TARGET_OS_IPHONE
 #define RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
 #else
 #undef RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
@@ -523,13 +525,13 @@ class RWTicketSpinLockT : boost::noncopyable {
  private: // Some x64-specific utilities for atomic access to ticket.
   template<class T> static T load_acquire(T* addr) {
     T t = *addr; // acquire barrier
-    asm volatile("" : : : "memory");
+    asm_volatile_memory();
     return t;
   }
 
   template<class T>
   static void store_release(T* addr, T v) {
-    asm volatile("" : : : "memory");
+    asm_volatile_memory();
     *addr = v; // release barrier
   }
 
@@ -587,7 +589,7 @@ class RWTicketSpinLockT : boost::noncopyable {
     int count = 0;
     QuarterInt val = __sync_fetch_and_add(&ticket.users, 1);
     while (val != load_acquire(&ticket.write)) {
-      asm volatile("pause");
+      asm_volatile_pause();
       if (UNLIKELY(++count > 1000)) sched_yield();
     }
   }
@@ -636,7 +638,7 @@ class RWTicketSpinLockT : boost::noncopyable {
     // need to let threads that already have a shared lock complete
     int count = 0;
     while (!LIKELY(try_lock_shared())) {
-      asm volatile("pause");
+      asm_volatile_pause();
       if (UNLIKELY((++count & 1023) == 0)) sched_yield();
     }
   }

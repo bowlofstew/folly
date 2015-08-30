@@ -17,6 +17,7 @@
 #include <folly/io/async/AsyncSocket.h>
 
 #include <folly/io/async/EventBase.h>
+#include <folly/io/async/EventHandler.h>
 #include <folly/SocketAddress.h>
 #include <folly/io/IOBuf.h>
 
@@ -24,6 +25,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <unistd.h>
+#include <thread>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -43,7 +45,7 @@ const AsyncSocketException socketClosedLocallyEx(
 const AsyncSocketException socketShutdownForWritesEx(
     AsyncSocketException::END_OF_FILE, "socket shutdown for writes");
 
-// TODO: It might help performance to provide a version of WriteRequest that
+// TODO: It might help performance to provide a version of BytesWriteRequest that
 // users could derive from, so we can avoid the extra allocation for each call
 // to write()/writev().  We could templatize TFramedAsyncChannel just like the
 // protocols are currently templatized for transports.
@@ -51,53 +53,6 @@ const AsyncSocketException socketShutdownForWritesEx(
 // We would need the version for external users where they provide the iovec
 // storage space, and only our internal version would allocate it at the end of
 // the WriteRequest.
-
-/**
- * A WriteRequest object tracks information about a pending write operation.
- */
-class AsyncSocket::WriteRequest {
- public:
-  WriteRequest(AsyncSocket* socket,
-               WriteRequest* next,
-               WriteCallback* callback,
-               uint32_t totalBytesWritten) :
-    socket_(socket), next_(next), callback_(callback),
-    totalBytesWritten_(totalBytesWritten) {}
-
-  virtual void destroy() = 0;
-
-  virtual bool performWrite() = 0;
-
-  virtual void consume() = 0;
-
-  virtual bool isComplete() = 0;
-
-  WriteRequest* getNext() const {
-    return next_;
-  }
-
-  WriteCallback* getCallback() const {
-    return callback_;
-  }
-
-  uint32_t getTotalBytesWritten() const {
-    return totalBytesWritten_;
-  }
-
-  void append(WriteRequest* next) {
-    assert(next_ == nullptr);
-    next_ = next;
-  }
-
- protected:
-  // protected destructor, to ensure callers use destroy()
-  virtual ~WriteRequest() {}
-
-  AsyncSocket* socket_;         ///< parent socket
-  WriteRequest* next_;          ///< pointer to next WriteRequest
-  WriteCallback* callback_;     ///< completion callback
-  uint32_t totalBytesWritten_;  ///< total bytes written
-};
 
 /* The default WriteRequest implementation, used for write(), writev() and
  * writeChain()
@@ -181,7 +136,7 @@ class AsyncSocket::BytesWriteRequest : public AsyncSocket::WriteRequest {
                     uint32_t bytesWritten,
                     unique_ptr<IOBuf>&& ioBuf,
                     WriteFlags flags)
-    : AsyncSocket::WriteRequest(socket, nullptr, callback, 0)
+    : AsyncSocket::WriteRequest(socket, callback)
     , opCount_(opCount)
     , opIndex_(0)
     , flags_(flags)
@@ -193,7 +148,7 @@ class AsyncSocket::BytesWriteRequest : public AsyncSocket::WriteRequest {
   }
 
   // private destructor, to ensure callers use destroy()
-  virtual ~BytesWriteRequest() {}
+  ~BytesWriteRequest() override = default;
 
   const struct iovec* getOps() const {
     assert(opCount_ > opIndex_);
@@ -221,7 +176,8 @@ class AsyncSocket::BytesWriteRequest : public AsyncSocket::WriteRequest {
 AsyncSocket::AsyncSocket()
   : eventBase_(nullptr)
   , writeTimeout_(this, nullptr)
-  , ioHandler_(this, nullptr) {
+  , ioHandler_(this, nullptr)
+  , immediateReadHandler_(this) {
   VLOG(5) << "new AsyncSocket()";
   init();
 }
@@ -229,7 +185,8 @@ AsyncSocket::AsyncSocket()
 AsyncSocket::AsyncSocket(EventBase* evb)
   : eventBase_(evb)
   , writeTimeout_(this, evb)
-  , ioHandler_(this, evb) {
+  , ioHandler_(this, evb)
+  , immediateReadHandler_(this) {
   VLOG(5) << "new AsyncSocket(" << this << ", evb=" << evb << ")";
   init();
 }
@@ -252,7 +209,8 @@ AsyncSocket::AsyncSocket(EventBase* evb,
 AsyncSocket::AsyncSocket(EventBase* evb, int fd)
   : eventBase_(evb)
   , writeTimeout_(this, evb)
-  , ioHandler_(this, evb, fd) {
+  , ioHandler_(this, evb, fd)
+  , immediateReadHandler_(this) {
   VLOG(5) << "new AsyncSocket(" << this << ", evb=" << evb << ", fd="
           << fd << ")";
   init();
@@ -569,6 +527,12 @@ void AsyncSocket::setReadCB(ReadCallback *callback) {
     return;
   }
 
+  /* We are removing a read callback */
+  if (callback == nullptr &&
+      immediateReadHandler_.isLoopCallbackScheduled()) {
+    immediateReadHandler_.cancelLoopCallback();
+  }
+
   if (shutdownFlags_ & SHUT_READ) {
     // Reads have already been shut down on this socket.
     //
@@ -770,6 +734,17 @@ void AsyncSocket::writeImpl(WriteCallback* callback, const iovec* vec,
   }
 }
 
+void AsyncSocket::writeRequest(WriteRequest* req) {
+  if (writeReqTail_ == nullptr) {
+    assert(writeReqHead_ == nullptr);
+    writeReqHead_ = writeReqTail_ = req;
+    req->start();
+  } else {
+    writeReqTail_->append(req);
+    writeReqTail_ = req;
+  }
+}
+
 void AsyncSocket::close() {
   VLOG(5) << "AsyncSocket::close(): this=" << this << ", fd_=" << fd_
           << ", state=" << state_ << ", shutdownFlags="
@@ -850,6 +825,10 @@ void AsyncSocket::closeNow() {
           assert(state_ == StateEnum::ERROR);
           return;
         }
+      }
+
+      if (immediateReadHandler_.isLoopCallbackScheduled()) {
+        immediateReadHandler_.cancelLoopCallback();
       }
 
       if (fd_ >= 0) {
@@ -1252,8 +1231,16 @@ void AsyncSocket::ioReady(uint16_t events) noexcept {
   }
 }
 
-ssize_t AsyncSocket::performRead(void* buf, size_t buflen) {
-  ssize_t bytes = recv(fd_, buf, buflen, MSG_DONTWAIT);
+ssize_t AsyncSocket::performRead(void** buf, size_t* buflen, size_t* offset) {
+  VLOG(5) << "AsyncSocket::performRead() this=" << this
+          << ", buf=" << *buf << ", buflen=" << *buflen;
+
+  int recvFlags = 0;
+  if (peek_) {
+    recvFlags |= MSG_PEEK;
+  }
+
+  ssize_t bytes = recv(fd_, *buf, *buflen, MSG_DONTWAIT | recvFlags);
   if (bytes < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       // No more data to read right now.
@@ -1265,6 +1252,12 @@ ssize_t AsyncSocket::performRead(void* buf, size_t buflen) {
     appBytesReceived_ += bytes;
     return bytes;
   }
+}
+
+void AsyncSocket::prepareReadBuffer(void** buf, size_t* buflen) noexcept {
+  // no matter what, buffer should be preapared for non-ssl socket
+  CHECK(readCallback_);
+  readCallback_->getReadBuffer(buf, buflen);
 }
 
 void AsyncSocket::handleRead() noexcept {
@@ -1298,9 +1291,10 @@ void AsyncSocket::handleRead() noexcept {
   while (readCallback_ && eventBase_ == originalEventBase) {
     // Get the buffer to read into.
     void* buf = nullptr;
-    size_t buflen = 0;
+    size_t buflen = 0, offset = 0;
     try {
-      readCallback_->getReadBuffer(&buf, &buflen);
+      prepareReadBuffer(&buf, &buflen);
+      VLOG(5) << "prepareReadBuffer() buf=" << buf << ", buflen=" << buflen;
     } catch (const AsyncSocketException& ex) {
       return failRead(__func__, ex);
     } catch (const std::exception& ex) {
@@ -1315,7 +1309,7 @@ void AsyncSocket::handleRead() noexcept {
                              "non-exception type");
       return failRead(__func__, ex);
     }
-    if (buf == nullptr || buflen == 0) {
+    if (!isBufferMovable_ && (buf == nullptr || buflen == 0)) {
       AsyncSocketException ex(AsyncSocketException::BAD_ARGS,
                              "ReadCallback::getReadBuffer() returned "
                              "empty buffer");
@@ -1323,9 +1317,23 @@ void AsyncSocket::handleRead() noexcept {
     }
 
     // Perform the read
-    ssize_t bytesRead = performRead(buf, buflen);
+    ssize_t bytesRead = performRead(&buf, &buflen, &offset);
+    VLOG(4) << "this=" << this << ", AsyncSocket::handleRead() got "
+            << bytesRead << " bytes";
     if (bytesRead > 0) {
-      readCallback_->readDataAvailable(bytesRead);
+      if (!isBufferMovable_) {
+        readCallback_->readDataAvailable(bytesRead);
+      } else {
+        CHECK(kOpenSslModeMoveBufferOwnership);
+        VLOG(5) << "this=" << this << ", AsyncSocket::handleRead() got "
+                << "buf=" << buf << ", " << bytesRead << "/" << buflen
+                << ", offset=" << offset;
+        auto readBuf = folly::IOBuf::takeOwnership(buf, buflen);
+        readBuf->trimStart(offset);
+        readBuf->trimEnd(buflen - offset - bytesRead);
+        readCallback_->readBufferAvailable(std::move(readBuf));
+      }
+
       // Fall through and continue around the loop if the read
       // completely filled the available buffer.
       // Note that readCallback_ may have been uninstalled or changed inside
@@ -1357,6 +1365,11 @@ void AsyncSocket::handleRead() noexcept {
       return;
     }
     if (maxReadsPerEvent_ && (++numReads >= maxReadsPerEvent_)) {
+      if (readCallback_ != nullptr) {
+        // We might still have data in the socket.
+        // (e.g. see comment in AsyncSSLSocket::checkForImmediateRead)
+        scheduleImmediateRead();
+      }
       return;
     }
   }

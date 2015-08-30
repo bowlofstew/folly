@@ -52,7 +52,7 @@ TypeError::TypeError(const std::string& expected,
       '\''))
 {}
 
-TypeError::~TypeError() {}
+TypeError::~TypeError() = default;
 
 // This is a higher-order preprocessor macro to aid going from runtime
 // types to the compile time type system.
@@ -100,27 +100,39 @@ bool dynamic::operator==(dynamic const& o) const {
 
 dynamic& dynamic::operator=(dynamic const& o) {
   if (&o != this) {
-    destroy();
-#define FB_X(T) new (getAddress<T>()) T(*o.getAddress<T>())
-    FB_DYNAMIC_APPLY(o.type_, FB_X);
+    if (type_ == o.type_) {
+#define FB_X(T) *getAddress<T>() = *o.getAddress<T>()
+      FB_DYNAMIC_APPLY(type_, FB_X);
 #undef FB_X
-    type_ = o.type_;
+    } else {
+      destroy();
+#define FB_X(T) new (getAddress<T>()) T(*o.getAddress<T>())
+      FB_DYNAMIC_APPLY(o.type_, FB_X);
+#undef FB_X
+      type_ = o.type_;
+    }
   }
   return *this;
 }
 
 dynamic& dynamic::operator=(dynamic&& o) noexcept {
   if (&o != this) {
-    destroy();
-#define FB_X(T) new (getAddress<T>()) T(std::move(*o.getAddress<T>()))
-    FB_DYNAMIC_APPLY(o.type_, FB_X);
+    if (type_ == o.type_) {
+#define FB_X(T) *getAddress<T>() = std::move(*o.getAddress<T>())
+      FB_DYNAMIC_APPLY(type_, FB_X);
 #undef FB_X
-    type_ = o.type_;
+    } else {
+      destroy();
+#define FB_X(T) new (getAddress<T>()) T(std::move(*o.getAddress<T>()))
+      FB_DYNAMIC_APPLY(o.type_, FB_X);
+#undef FB_X
+      type_ = o.type_;
+    }
   }
   return *this;
 }
 
-dynamic& dynamic::operator[](dynamic const& k) {
+dynamic& dynamic::operator[](dynamic const& k) & {
   if (!isObject() && !isArray()) {
     throw TypeError("object/array", type());
   }
@@ -132,28 +144,46 @@ dynamic& dynamic::operator[](dynamic const& k) {
   return ret.first->second;
 }
 
-dynamic dynamic::getDefault(const dynamic& k, const dynamic& v) const {
+dynamic dynamic::getDefault(const dynamic& k, const dynamic& v) const& {
   auto& obj = get<ObjectImpl>();
   auto it = obj.find(k);
   return it == obj.end() ? v : it->second;
 }
 
-dynamic&& dynamic::getDefault(const dynamic& k, dynamic&& v) const {
+dynamic dynamic::getDefault(const dynamic& k, dynamic&& v) const& {
   auto& obj = get<ObjectImpl>();
   auto it = obj.find(k);
-  if (it != obj.end()) {
-    v = it->second;
+  // Avoid clang bug with ternary
+  if (it == obj.end()) {
+    return std::move(v);
+  } else {
+    return it->second;
   }
-
-  return std::move(v);
 }
 
-const dynamic* dynamic::get_ptr(dynamic const& idx) const {
+dynamic dynamic::getDefault(const dynamic& k, const dynamic& v) && {
+  auto& obj = get<ObjectImpl>();
+  auto it = obj.find(k);
+  // Avoid clang bug with ternary
+  if (it == obj.end()) {
+    return v;
+  } else {
+    return std::move(it->second);
+  }
+}
+
+dynamic dynamic::getDefault(const dynamic& k, dynamic&& v) && {
+  auto& obj = get<ObjectImpl>();
+  auto it = obj.find(k);
+  return std::move(it == obj.end() ? v : it->second);
+}
+
+const dynamic* dynamic::get_ptr(dynamic const& idx) const& {
   if (auto* parray = get_nothrow<Array>()) {
     if (!idx.isInt()) {
       throw TypeError("int64", idx.type());
     }
-    if (idx >= parray->size()) {
+    if (idx < 0 || idx >= parray->size()) {
       return nullptr;
     }
     return &(*parray)[idx.asInt()];
@@ -168,12 +198,12 @@ const dynamic* dynamic::get_ptr(dynamic const& idx) const {
   }
 }
 
-dynamic const& dynamic::at(dynamic const& idx) const {
+dynamic const& dynamic::at(dynamic const& idx) const& {
   if (auto* parray = get_nothrow<Array>()) {
     if (!idx.isInt()) {
       throw TypeError("int64", idx.type());
     }
-    if (idx >= parray->size()) {
+    if (idx < 0 || idx >= parray->size()) {
       throw std::out_of_range("out of range in dynamic array");
     }
     return (*parray)[idx.asInt()];

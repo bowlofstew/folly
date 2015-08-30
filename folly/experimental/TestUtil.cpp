@@ -26,6 +26,7 @@
 #include <folly/Exception.h>
 #include <folly/File.h>
 #include <folly/FileUtil.h>
+#include <folly/String.h>
 
 namespace folly {
 namespace test {
@@ -55,7 +56,7 @@ TemporaryFile::TemporaryFile(StringPiece namePrefix,
     closeOnDestruction_(closeOnDestruction),
     fd_(-1),
     path_(generateUniquePath(std::move(dir), namePrefix)) {
-  fd_ = open(path_.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
+  fd_ = open(path_.string().c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
   checkUnixError(fd_, "open failed");
 
   if (scope_ == Scope::UNLINK_IMMEDIATELY) {
@@ -112,12 +113,12 @@ TemporaryDirectory::~TemporaryDirectory() {
 }
 
 ChangeToTempDir::ChangeToTempDir() : initialPath_(fs::current_path()) {
-  std::string p = dir_.path().native();
+  std::string p = dir_.path().string();
   ::chdir(p.c_str());
 }
 
 ChangeToTempDir::~ChangeToTempDir() {
-  std::string p = initialPath_.native();
+  std::string p = initialPath_.string();
   ::chdir(p.c_str());
 }
 
@@ -141,7 +142,7 @@ CaptureFD::CaptureFD(int fd) : fd_(fd), readOffset_(0) {
   oldFDCopy_ = dup(fd_);
   PCHECK(oldFDCopy_ != -1) << "Could not copy FD " << fd_;
 
-  int file_fd = open(file_.path().c_str(), O_WRONLY|O_CREAT, 0600);
+  int file_fd = open(file_.path().string().c_str(), O_WRONLY|O_CREAT, 0600);
   PCHECK(dup2(file_fd, fd_) != -1) << "Could not replace FD " << fd_
     << " with " << file_fd;
   PCHECK(close(file_fd) != -1) << "Could not close " << file_fd;
@@ -162,13 +163,13 @@ CaptureFD::~CaptureFD() {
 
 std::string CaptureFD::read() {
   std::string contents;
-  std::string filename = file_.path().native();
+  std::string filename = file_.path().string();
   PCHECK(folly::readFile(filename.c_str(), contents));
   return contents;
 }
 
 std::string CaptureFD::readIncremental() {
-  std::string filename = file_.path().native();
+  std::string filename = file_.path().string();
   // Yes, I know that I could just keep the file open instead. So sue me.
   folly::File f(openNoInt(filename.c_str(), O_RDONLY), true);
   auto size = lseek(f.fd(), 0, SEEK_END) - readOffset_;
@@ -177,6 +178,36 @@ std::string CaptureFD::readIncremental() {
   PCHECK(size == bytes_read);
   readOffset_ += size;
   return std::string(buf.get(), size);
+}
+
+static std::map<std::string, std::string> getEnvVarMap() {
+  std::map<std::string, std::string> data;
+  for (auto it = environ; *it != nullptr; ++it) {
+    std::string key, value;
+    split("=", *it, key, value);
+    if (key.empty()) {
+      continue;
+    }
+    CHECK(!data.count(key)) << "already contains: " << key;
+    data.emplace(move(key), move(value));
+  }
+  return data;
+}
+
+EnvVarSaver::EnvVarSaver() {
+  saved_ = getEnvVarMap();
+}
+
+EnvVarSaver::~EnvVarSaver() {
+  for (const auto& kvp : getEnvVarMap()) {
+    if (saved_.count(kvp.first)) {
+      continue;
+    }
+    PCHECK(0 == unsetenv(kvp.first.c_str()));
+  }
+  for (const auto& kvp : saved_) {
+    PCHECK(0 == setenv(kvp.first.c_str(), kvp.second.c_str(), (int)true));
+  }
 }
 
 }  // namespace test

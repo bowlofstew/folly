@@ -66,7 +66,7 @@ class AsyncServerSocket : public DelayedDestruction
 
   class AcceptCallback {
    public:
-    virtual ~AcceptCallback() {}
+    virtual ~AcceptCallback() = default;
 
     /**
      * connectionAccepted() is called whenever a new client connection is
@@ -80,7 +80,7 @@ class AsyncServerSocket : public DelayedDestruction
      *                    for closing it when done.  The newly accepted file
      *                    descriptor will have already been put into
      *                    non-blocking mode.
-     * @param clientAddr  A reference to a TSocketAddress struct containing the
+     * @param clientAddr  A reference to a SocketAddress struct containing the
      *                    client's address.  This struct is only guaranteed to
      *                    remain valid until connectionAccepted() returns.
      */
@@ -614,7 +614,7 @@ class AsyncServerSocket : public DelayedDestruction
     explicit RemoteAcceptor(AcceptCallback *callback)
       : callback_(callback) {}
 
-    ~RemoteAcceptor() {}
+    ~RemoteAcceptor() = default;
 
     void start(EventBase *eventBase, uint32_t maxAtOnce, uint32_t maxInQueue);
     void stop(EventBase* eventBase, AcceptCallback* callback);

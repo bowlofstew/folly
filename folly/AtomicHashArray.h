@@ -128,17 +128,19 @@ class AtomicHashArray : boost::noncopyable {
     int    entryCountThreadCacheSize;
     size_t capacity; // if positive, overrides maxLoadFactor
 
-    constexpr Config() : emptyKey((KeyT)-1),
-                         lockedKey((KeyT)-2),
-                         erasedKey((KeyT)-3),
-                         maxLoadFactor(0.8),
-                         growthFactor(-1),
-                         entryCountThreadCacheSize(1000),
-                         capacity(0) {}
+  public:
+    //  Cannot have constexpr ctor because some compilers rightly complain.
+    Config() : emptyKey((KeyT)-1),
+               lockedKey((KeyT)-2),
+               erasedKey((KeyT)-3),
+               maxLoadFactor(0.8),
+               growthFactor(-1),
+               entryCountThreadCacheSize(1000),
+               capacity(0) {}
   };
 
-  static const Config defaultConfig;
-  static SmartPtr create(size_t maxSize, const Config& = defaultConfig);
+  //  Cannot have pre-instantiated const Config instance because of SIOF.
+  static SmartPtr create(size_t maxSize, const Config& c = Config());
 
   iterator find(KeyT k) {
     return iterator(this, findInternal(k).idx);
@@ -232,7 +234,7 @@ class AtomicHashArray : boost::noncopyable {
 
   struct SimpleRetT { size_t idx; bool success;
     SimpleRetT(size_t i, bool s) : idx(i), success(s) {}
-    SimpleRetT() {}
+    SimpleRetT() = default;
   };
 
   template <class T>
@@ -277,7 +279,7 @@ class AtomicHashArray : boost::noncopyable {
   AtomicHashArray(size_t capacity, KeyT emptyKey, KeyT lockedKey,
                   KeyT erasedKey, double maxLoadFactor, size_t cacheSize);
 
-  ~AtomicHashArray() {}
+  ~AtomicHashArray() = default;
 
   inline void unlockCell(value_type* const cell, KeyT newKey) {
     cellKeyPtr(*cell)->store(newKey, std::memory_order_release);
@@ -295,7 +297,7 @@ class AtomicHashArray : boost::noncopyable {
     return LIKELY(probe < capacity_) ? probe : hashVal % capacity_;
   }
 
-  inline size_t probeNext(size_t idx, size_t numProbes) {
+  inline size_t probeNext(size_t idx, size_t /*numProbes*/) {
     //idx += numProbes; // quadratic probing
     idx += 1; // linear probing
     // Avoid modulus because it's slow

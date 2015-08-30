@@ -17,6 +17,7 @@
 #pragma once
 
 #include <folly/futures/Promise.h>
+#include <folly/Portability.h>
 
 namespace folly {
 
@@ -45,8 +46,10 @@ public:
   SharedPromise(SharedPromise<T>&&) noexcept;
   SharedPromise& operator=(SharedPromise<T>&&) noexcept;
 
-  /** Return a Future tied to the shared core state. This can be called only
-    once, thereafter Future already retrieved exception will be raised. */
+  /**
+   * Return a Future tied to the shared core state. Unlike Promise::getFuture,
+   * this can be called an unlimited number of times per SharedPromise.
+   */
   Future<T> getFuture();
 
   /** Return the number of Futures associated with this SharedPromise */
@@ -62,7 +65,8 @@ public:
       p.setException(std::current_exception());
     }
     */
-  void setException(std::exception_ptr const&) DEPRECATED;
+  FOLLY_DEPRECATED("use setException(exception_wrapper)")
+  void setException(std::exception_ptr const&);
 
   /** Fulfill the SharedPromise with an exception type E, which can be passed to
     std::make_exception_ptr(). Useful for originating exceptions. If you
@@ -78,13 +82,6 @@ public:
   /// an exception (or special value) indicating how the interrupt was
   /// handled.
   void setInterruptHandler(std::function<void(exception_wrapper const&)>);
-
-  /// Fulfill this SharedPromise<void>
-  template <class B = T>
-  typename std::enable_if<std::is_void<B>::value, void>::type
-  setValue() {
-    setTry(Try<T>());
-  }
 
   /// Sugar to fulfill this SharedPromise<Unit>
   template <class B = T>

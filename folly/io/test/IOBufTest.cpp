@@ -24,6 +24,8 @@
 #include <folly/Malloc.h>
 #include <folly/Range.h>
 
+#include <cstddef>
+
 using folly::fbstring;
 using folly::fbvector;
 using folly::IOBuf;
@@ -792,11 +794,7 @@ TEST(IOBuf, takeOwnershipUniquePtr) {
 }
 
 TEST(IOBuf, Alignment) {
-  // max_align_t doesn't exist in gcc 4.6.2
-  struct MaxAlign {
-    char c;
-  } __attribute__((__aligned__));
-  size_t alignment = alignof(MaxAlign);
+  size_t alignment = alignof(std::max_align_t);
 
   std::vector<size_t> sizes {0, 1, 64, 256, 1024, 1 << 10};
   for (size_t size : sizes) {
@@ -832,7 +830,7 @@ enum BufType {
 class MoveToFbStringTest
   : public ::testing::TestWithParam<std::tr1::tuple<int, int, bool, BufType>> {
  protected:
-  void SetUp() {
+  void SetUp() override {
     elementSize_ = std::tr1::get<0>(GetParam());
     elementCount_ = std::tr1::get<1>(GetParam());
     shared_ = std::tr1::get<2>(GetParam());
@@ -1106,6 +1104,135 @@ TEST(IOBuf, ReserveWithHeadroom) {
   EXPECT_LE(tailroom, buf.tailroom());
   EXPECT_EQ(sizeof(data), buf.length());
   EXPECT_EQ(0, memcmp(data, buf.data(), sizeof(data)));
+}
+
+TEST(IOBuf, CopyConstructorAndAssignmentOperator) {
+  auto buf = IOBuf::create(4096);
+  append(buf, "hello world");
+  auto buf2 = IOBuf::create(4096);
+  append(buf2, " goodbye");
+  buf->prependChain(std::move(buf2));
+  EXPECT_FALSE(buf->isShared());
+
+  {
+    auto copy = *buf;
+    EXPECT_TRUE(buf->isShared());
+    EXPECT_TRUE(copy.isShared());
+    EXPECT_EQ((void*)buf->data(), (void*)copy.data());
+    EXPECT_NE(buf->next(), copy.next());  // actually different buffers
+
+    auto copy2 = *buf;
+    copy2.coalesce();
+    EXPECT_TRUE(buf->isShared());
+    EXPECT_TRUE(copy.isShared());
+    EXPECT_FALSE(copy2.isShared());
+
+    auto p = reinterpret_cast<const char*>(copy2.data());
+    EXPECT_EQ("hello world goodbye", std::string(p, copy2.length()));
+  }
+
+  EXPECT_FALSE(buf->isShared());
+
+  {
+    folly::IOBuf newBuf(folly::IOBuf::CREATE, 4096);
+    EXPECT_FALSE(newBuf.isShared());
+
+    auto newBufCopy = newBuf;
+    EXPECT_TRUE(newBuf.isShared());
+    EXPECT_TRUE(newBufCopy.isShared());
+
+    newBufCopy = *buf;
+    EXPECT_TRUE(buf->isShared());
+    EXPECT_FALSE(newBuf.isShared());
+    EXPECT_TRUE(newBufCopy.isShared());
+  }
+
+  EXPECT_FALSE(buf->isShared());
+}
+
+namespace {
+// Use with string literals only
+std::unique_ptr<IOBuf> wrap(const char* str) {
+  return IOBuf::wrapBuffer(str, strlen(str));
+}
+
+std::unique_ptr<IOBuf> copy(const char* str) {
+  // At least 1KiB of tailroom, to ensure an external buffer
+  return IOBuf::copyBuffer(str, strlen(str), 0, 1024);
+}
+
+std::string toString(const folly::IOBuf& buf) {
+  std::string result;
+  result.reserve(buf.computeChainDataLength());
+  for (auto& b : buf) {
+    result.append(reinterpret_cast<const char*>(b.data()), b.size());
+  }
+  return result;
+}
+
+char* writableStr(folly::IOBuf& buf) {
+  return reinterpret_cast<char*>(buf.writableData());
+}
+
+}  // namespace
+
+TEST(IOBuf, Managed) {
+  auto hello = "hello";
+  auto buf1UP = wrap(hello);
+  auto buf1 = buf1UP.get();
+  EXPECT_FALSE(buf1->isManagedOne());
+  auto buf2UP = copy("world");
+  auto buf2 = buf2UP.get();
+  EXPECT_TRUE(buf2->isManagedOne());
+  auto buf3UP = wrap(hello);
+  auto buf3 = buf3UP.get();
+  auto buf4UP = buf2->clone();
+  auto buf4 = buf4UP.get();
+
+  // buf1 and buf3 share the same memory (but are unmanaged)
+  EXPECT_FALSE(buf1->isManagedOne());
+  EXPECT_FALSE(buf3->isManagedOne());
+  EXPECT_TRUE(buf1->isSharedOne());
+  EXPECT_TRUE(buf3->isSharedOne());
+  EXPECT_EQ(buf1->data(), buf3->data());
+
+  // buf2 and buf4 share the same memory (but are managed)
+  EXPECT_TRUE(buf2->isManagedOne());
+  EXPECT_TRUE(buf4->isManagedOne());
+  EXPECT_TRUE(buf2->isSharedOne());
+  EXPECT_TRUE(buf4->isSharedOne());
+  EXPECT_EQ(buf2->data(), buf4->data());
+
+  buf1->prependChain(std::move(buf2UP));
+  buf1->prependChain(std::move(buf3UP));
+  buf1->prependChain(std::move(buf4UP));
+
+  EXPECT_EQ("helloworldhelloworld", toString(*buf1));
+  EXPECT_FALSE(buf1->isManaged());
+
+  buf1->makeManaged();
+  EXPECT_TRUE(buf1->isManaged());
+
+  // buf1 and buf3 are now unshared (because they were unmanaged)
+  EXPECT_TRUE(buf1->isManagedOne());
+  EXPECT_TRUE(buf3->isManagedOne());
+  EXPECT_FALSE(buf1->isSharedOne());
+  EXPECT_FALSE(buf3->isSharedOne());
+  EXPECT_NE(buf1->data(), buf3->data());
+
+  // buf2 and buf4 are still shared
+  EXPECT_TRUE(buf2->isManagedOne());
+  EXPECT_TRUE(buf4->isManagedOne());
+  EXPECT_TRUE(buf2->isSharedOne());
+  EXPECT_TRUE(buf4->isSharedOne());
+  EXPECT_EQ(buf2->data(), buf4->data());
+
+  // And verify that the truth is what we expect: modify a byte in buf1 and
+  // buf2, see that the change from buf1 is *not* reflected in buf3, but the
+  // change from buf2 is reflected in buf4.
+  writableStr(*buf1)[0] = 'j';
+  writableStr(*buf2)[0] = 'x';
+  EXPECT_EQ("jelloxorldhelloxorld", toString(*buf1));
 }
 
 int main(int argc, char** argv) {

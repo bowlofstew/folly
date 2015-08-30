@@ -15,18 +15,41 @@
  */
 #pragma once
 
+#include <memory>
+
 namespace folly { namespace fibers {
+
+class StackCacheEntry;
 
 /**
  * Stack allocator that protects an extra memory page after
  * the end of the stack.
+ * Will only add extra memory pages up to a certain number of allocations
+ * to avoid creating too many memory maps for the process.
  */
 class GuardPageAllocator {
  public:
-  inline unsigned char* allocate(size_t size);
-  inline void deallocate(unsigned char* up, size_t size);
+  /**
+   * @param useGuardPages if true, protect limited amount of stacks with guard
+   *                      pages, otherwise acts as std::allocator.
+   */
+  explicit GuardPageAllocator(bool useGuardPages);
+  ~GuardPageAllocator();
+
+  /**
+   * @return pointer to the bottom of the allocated stack of `size' bytes.
+   */
+  unsigned char* allocate(size_t size);
+
+  /**
+   * Deallocates the previous result of an `allocate(size)' call.
+   */
+  void deallocate(unsigned char* limit, size_t size);
+
+ private:
+  std::unique_ptr<StackCacheEntry> stackCache_;
+  std::allocator<unsigned char> fallbackAllocator_;
+  bool useGuardPages_{true};
 };
 
 }}  // folly::fibers
-
-#include "GuardPageAllocator-inl.h"

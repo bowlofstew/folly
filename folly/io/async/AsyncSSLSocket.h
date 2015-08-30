@@ -83,7 +83,7 @@ class AsyncSSLSocket : public virtual AsyncSocket {
 
   class HandshakeCB {
    public:
-    virtual ~HandshakeCB() {}
+    virtual ~HandshakeCB() = default;
 
     /**
      * handshakeVer() is invoked during handshaking to give the
@@ -99,9 +99,9 @@ class AsyncSSLSocket : public virtual AsyncSocket {
      * See the passages on verify_callback in SSL_CTX_set_verify(3)
      * for more details.
      */
-    virtual bool handshakeVer(AsyncSSLSocket* sock,
+    virtual bool handshakeVer(AsyncSSLSocket* /*sock*/,
                                  bool preverifyOk,
-                                 X509_STORE_CTX* ctx) noexcept {
+                                 X509_STORE_CTX* /*ctx*/) noexcept {
       return preverifyOk;
     }
 
@@ -162,7 +162,7 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    * Create a client AsyncSSLSocket
    */
   AsyncSSLSocket(const std::shared_ptr<folly::SSLContext> &ctx,
-                  EventBase* evb);
+                 EventBase* evb, bool deferSecurityNegotiation = false);
 
   /**
    * Create a server/client AsyncSSLSocket from an already connected
@@ -178,9 +178,12 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    * @param evb EventBase that will manage this socket.
    * @param fd  File descriptor to take over (should be a connected socket).
    * @param server Is socket in server mode?
+   * @param deferSecurityNegotiation
+   *          unencrypted data can be sent before sslConn/Accept
    */
   AsyncSSLSocket(const std::shared_ptr<folly::SSLContext>& ctx,
-                  EventBase* evb, int fd, bool server = true);
+                 EventBase* evb, int fd,
+                 bool server = true, bool deferSecurityNegotiation = false);
 
 
   /**
@@ -188,9 +191,10 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    */
   static std::shared_ptr<AsyncSSLSocket> newSocket(
     const std::shared_ptr<folly::SSLContext>& ctx,
-    EventBase* evb, int fd, bool server=true) {
+    EventBase* evb, int fd, bool server=true,
+    bool deferSecurityNegotiation = false) {
     return std::shared_ptr<AsyncSSLSocket>(
-      new AsyncSSLSocket(ctx, evb, fd, server),
+      new AsyncSSLSocket(ctx, evb, fd, server, deferSecurityNegotiation),
       Destructor());
   }
 
@@ -199,9 +203,9 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    */
   static std::shared_ptr<AsyncSSLSocket> newSocket(
     const std::shared_ptr<folly::SSLContext>& ctx,
-    EventBase* evb) {
+    EventBase* evb, bool deferSecurityNegotiation = false) {
     return std::shared_ptr<AsyncSSLSocket>(
-      new AsyncSSLSocket(ctx, evb),
+      new AsyncSSLSocket(ctx, evb, deferSecurityNegotiation),
       Destructor());
   }
 
@@ -213,7 +217,8 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    */
   AsyncSSLSocket(const std::shared_ptr<folly::SSLContext> &ctx,
                   EventBase* evb,
-                  const std::string& serverName);
+                 const std::string& serverName,
+                bool deferSecurityNegotiation = false);
 
   /**
    * Create a client AsyncSSLSocket from an already connected
@@ -233,14 +238,16 @@ class AsyncSSLSocket : public virtual AsyncSocket {
   AsyncSSLSocket(const std::shared_ptr<folly::SSLContext>& ctx,
                   EventBase* evb,
                   int fd,
-                  const std::string& serverName);
+                 const std::string& serverName,
+                bool deferSecurityNegotiation = false);
 
   static std::shared_ptr<AsyncSSLSocket> newSocket(
     const std::shared_ptr<folly::SSLContext>& ctx,
     EventBase* evb,
-    const std::string& serverName) {
+    const std::string& serverName,
+    bool deferSecurityNegotiation = false) {
     return std::shared_ptr<AsyncSSLSocket>(
-      new AsyncSSLSocket(ctx, evb, serverName),
+      new AsyncSSLSocket(ctx, evb, serverName, deferSecurityNegotiation),
       Destructor());
   }
 #endif
@@ -336,6 +343,7 @@ class AsyncSSLSocket : public virtual AsyncSocket {
 
   enum SSLStateEnum {
     STATE_UNINIT,
+    STATE_UNENCRYPTED,
     STATE_ACCEPTING,
     STATE_CACHE_LOOKUP,
     STATE_RSA_ASYNC_PENDING,
@@ -648,6 +656,8 @@ class AsyncSSLSocket : public virtual AsyncSocket {
     return minWriteSize_;
   }
 
+  void setReadCB(ReadCallback* callback) override;
+
  private:
 
   void init();
@@ -658,14 +668,14 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    * Protected destructor.
    *
    * Users of AsyncSSLSocket must never delete it directly.  Instead, invoke
-   * destroy() instead.  (See the documentation in TDelayedDestruction.h for
+   * destroy() instead.  (See the documentation in DelayedDestruction.h for
    * more details.)
    */
   ~AsyncSSLSocket();
 
   // Inherit event notification methods from AsyncSocket except
   // the following.
-
+  void prepareReadBuffer(void** buf, size_t* buflen) noexcept override;
   void handleRead() noexcept override;
   void handleWrite() noexcept override;
   void handleAccept() noexcept;
@@ -678,10 +688,15 @@ class AsyncSSLSocket : public virtual AsyncSocket {
   // AsyncSocket calls this at the wrong time for SSL
   void handleInitialReadWrite() noexcept override {}
 
-  ssize_t performRead(void* buf, size_t buflen) override;
+  int interpretSSLError(int rc, int error);
+  ssize_t performRead(void** buf, size_t* buflen, size_t* offset) override;
   ssize_t performWrite(const iovec* vec, uint32_t count, WriteFlags flags,
                        uint32_t* countWritten, uint32_t* partialWritten)
     override;
+
+  ssize_t performWriteIovec(const iovec* vec, uint32_t count,
+                            WriteFlags flags, uint32_t* countWritten,
+                            uint32_t* partialWritten);
 
   // This virtual wrapper around SSL_write exists solely for testing/mockability
   virtual int sslWriteImpl(SSL *ssl, const void *buf, int n) {
